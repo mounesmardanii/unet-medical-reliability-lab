@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing and code-quality caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Raw data
+data/raw/*
+!data/raw/.gitkeep
+
+# Trained models and exported files
+models/*.pth
+models/*.pt
+models/*.ts
+models/*.onnx
+
+# Generated artifacts
+reports/artifacts/*.npz
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# VS Code local settings
+.vscode/settings.json

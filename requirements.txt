@@ -1,0 +1,12 @@
+numpy
+pandas
+matplotlib
+scipy
+scikit-learn
+pillow
+torch
+torchvision
+jupyter
+ipykernel
+nbformat
+pytest
