@@ -8,6 +8,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from src.metrics import binary_segmentation_metrics_from_logits
 from pathlib import Path
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
 def train_one_epoch(
@@ -158,12 +159,28 @@ def fit_model(
     num_epochs: int,
     checkpoint_path: str | Path,
     threshold: float = 0.5,
+    scheduler: ReduceLROnPlateau | None = None,
+    early_stopping_patience: int | None = None,
+    early_stopping_min_delta: float = 0.0,
 ) -> list[dict[str, int | float]]:
     """Train for multiple epochs and save the best validation model."""
 
     if num_epochs <= 0:
         raise ValueError(
             "Number of epochs must be greater than zero."
+        )
+
+    if (
+        early_stopping_patience is not None
+        and early_stopping_patience <= 0
+    ):
+        raise ValueError(
+            "Early-stopping patience must be greater than zero."
+        )
+
+    if early_stopping_min_delta < 0:
+        raise ValueError(
+            "Early-stopping minimum delta cannot be negative."
         )
 
     checkpoint_path = Path(checkpoint_path)
@@ -176,9 +193,15 @@ def fit_model(
     history: list[dict[str, int | float]] = []
 
     best_validation_dice = float("-inf")
+    best_early_stopping_dice = float("-inf")
+    epochs_without_significant_improvement = 0
 
     for epoch_index in range(num_epochs):
         epoch_number = epoch_index + 1
+
+        epoch_learning_rate = float(
+            optimizer.param_groups[0]["lr"]
+        )
 
         train_result = train_one_epoch(
             model=model,
@@ -196,17 +219,21 @@ def fit_model(
             threshold=threshold,
         )
 
+        validation_dice = validation_result["dice"]
+
         epoch_record: dict[str, int | float] = {
             "epoch": epoch_number,
+            "learning_rate": epoch_learning_rate,
             "train_loss": train_result["loss"],
             "validation_loss": validation_result["loss"],
-            "validation_dice": validation_result["dice"],
+            "validation_dice": validation_dice,
             "validation_iou": validation_result["iou"],
         }
 
         history.append(epoch_record)
 
-        validation_dice = validation_result["dice"]
+        if scheduler is not None:
+            scheduler.step(validation_dice)
 
         if validation_dice > best_validation_dice:
             best_validation_dice = validation_dice
@@ -216,6 +243,12 @@ def fit_model(
                     "epoch": epoch_number,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": (
+                        scheduler.state_dict()
+                        if scheduler is not None
+                        else None
+                    ),
+                    "learning_rate": epoch_learning_rate,
                     "validation_loss": validation_result["loss"],
                     "validation_dice": validation_dice,
                     "validation_iou": validation_result["iou"],
@@ -224,13 +257,52 @@ def fit_model(
                 checkpoint_path,
             )
 
+        significant_improvement = (
+            validation_dice
+            > (
+                best_early_stopping_dice
+                + early_stopping_min_delta
+            )
+        )
+
+        if significant_improvement:
+            best_early_stopping_dice = validation_dice
+            epochs_without_significant_improvement = 0
+        else:
+            epochs_without_significant_improvement += 1
+
+        next_learning_rate = float(
+            optimizer.param_groups[0]["lr"]
+        )
+
         print(
             f"Epoch {epoch_number:03d}/{num_epochs:03d} | "
+            f"LR: {epoch_learning_rate:.2e} | "
             f"Train Loss: {train_result['loss']:.4f} | "
             f"Validation Loss: "
             f"{validation_result['loss']:.4f} | "
-            f"Dice: {validation_result['dice']:.4f} | "
+            f"Dice: {validation_dice:.4f} | "
             f"IoU: {validation_result['iou']:.4f}"
         )
+
+        if next_learning_rate < epoch_learning_rate:
+            print(
+                "Learning rate reduced: "
+                f"{epoch_learning_rate:.2e} "
+                f"-> {next_learning_rate:.2e}"
+            )
+
+        if (
+            early_stopping_patience is not None
+            and epochs_without_significant_improvement
+            >= early_stopping_patience
+        ):
+            print(
+                "Early stopping activated after "
+                f"{epoch_number} epochs. "
+                "Best validation Dice: "
+                f"{best_validation_dice:.4f}"
+            )
+            break
 
     return history

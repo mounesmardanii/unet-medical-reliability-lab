@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.data import create_busi_dataloaders
 from src.losses import BCEDiceLoss
@@ -51,7 +52,7 @@ def parse_arguments() -> argparse.Namespace:
         "--epochs",
         type=int,
         default=30,
-        help="Number of complete training epochs.",
+        help="Maximum number of complete training epochs.",
     )
 
     parser.add_argument(
@@ -94,6 +95,53 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=1e-4,
         help="AdamW weight-decay coefficient.",
+    )
+
+    parser.add_argument(
+        "--scheduler-factor",
+        type=float,
+        default=0.5,
+        help=(
+            "Factor used to reduce the learning rate "
+            "after a validation plateau."
+        ),
+    )
+
+    parser.add_argument(
+        "--scheduler-patience",
+        type=int,
+        default=3,
+        help=(
+            "Number of plateau epochs tolerated before "
+            "reducing the learning rate."
+        ),
+    )
+
+    parser.add_argument(
+        "--minimum-learning-rate",
+        type=float,
+        default=1e-6,
+        help="Lowest learning rate allowed by the scheduler.",
+    )
+
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help=(
+            "Number of insignificant validation epochs "
+            "allowed before stopping."
+        ),
+    )
+
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-3,
+        help=(
+            "Minimum Dice improvement required to reset "
+            "early stopping."
+        ),
     )
 
     parser.add_argument(
@@ -153,6 +201,41 @@ def validate_arguments(
     if arguments.weight_decay < 0:
         raise ValueError(
             "Weight decay cannot be negative."
+        )
+
+    if not 0.0 < arguments.scheduler_factor < 1.0:
+        raise ValueError(
+            "Scheduler factor must be between zero and one."
+        )
+
+    if arguments.scheduler_patience < 0:
+        raise ValueError(
+            "Scheduler patience cannot be negative."
+        )
+
+    if arguments.minimum_learning_rate < 0:
+        raise ValueError(
+            "Minimum learning rate cannot be negative."
+        )
+
+    if (
+        arguments.minimum_learning_rate
+        >= arguments.learning_rate
+    ):
+        raise ValueError(
+            "Minimum learning rate must be lower than "
+            "the initial learning rate."
+        )
+
+    if arguments.early_stopping_patience <= 0:
+        raise ValueError(
+            "Early-stopping patience must be greater "
+            "than zero."
+        )
+
+    if arguments.early_stopping_min_delta < 0:
+        raise ValueError(
+            "Early-stopping minimum delta cannot be negative."
         )
 
     if arguments.base_channels <= 0:
@@ -223,6 +306,20 @@ def main() -> None:
     print(f"Data root: {arguments.data_root}")
     print(f"Manifest: {arguments.manifest_path}")
     print(f"Output directory: {arguments.output_dir}")
+    print(f"Maximum epochs: {arguments.epochs}")
+    print(f"Initial learning rate: {arguments.learning_rate}")
+    print(
+        "Scheduler: "
+        f"factor={arguments.scheduler_factor}, "
+        f"patience={arguments.scheduler_patience}, "
+        f"minimum_lr={arguments.minimum_learning_rate}"
+    )
+    print(
+        "Early stopping: "
+        f"patience={arguments.early_stopping_patience}, "
+        f"minimum_delta="
+        f"{arguments.early_stopping_min_delta}"
+    )
 
     data_loaders = create_busi_dataloaders(
         root=arguments.data_root,
@@ -273,6 +370,16 @@ def main() -> None:
         weight_decay=arguments.weight_decay,
     )
 
+    scheduler = ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode="max",
+        factor=arguments.scheduler_factor,
+        patience=arguments.scheduler_patience,
+        threshold=1e-4,
+        threshold_mode="abs",
+        min_lr=arguments.minimum_learning_rate,
+    )
+
     arguments.output_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -298,6 +405,13 @@ def main() -> None:
         num_epochs=arguments.epochs,
         checkpoint_path=checkpoint_path,
         threshold=arguments.threshold,
+        scheduler=scheduler,
+        early_stopping_patience=(
+            arguments.early_stopping_patience
+        ),
+        early_stopping_min_delta=(
+            arguments.early_stopping_min_delta
+        ),
     )
 
     save_training_history(
@@ -312,6 +426,7 @@ def main() -> None:
 
     print()
     print("Training completed.")
+    print(f"Completed epochs: {len(history)}")
     print(f"Best checkpoint: {checkpoint_path}")
     print(f"Training history: {history_path}")
     print(
@@ -325,6 +440,10 @@ def main() -> None:
     print(
         f"Best validation IoU: "
         f"{best_epoch_record['validation_iou']:.4f}"
+    )
+    print(
+        f"Learning rate at best epoch: "
+        f"{best_epoch_record['learning_rate']:.2e}"
     )
 
 
