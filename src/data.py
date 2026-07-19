@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from PIL import Image
+from PIL import Image, ImageStat
 from torch.utils.data import Dataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
@@ -34,6 +34,7 @@ def discover_busi_samples(
     """Find and validate all BUSI image-mask pairs."""
 
     root = Path(root)
+
     images_dir = root / "images"
     labels_dir = root / "labels"
 
@@ -50,7 +51,10 @@ def discover_busi_samples(
     samples: list[BUSISample] = []
 
     for image_path in sorted(images_dir.glob("*.png")):
-        class_name = image_path.stem.split("_", maxsplit=1)[0]
+        class_name = image_path.stem.split(
+            "_",
+            maxsplit=1,
+        )[0]
 
         if class_name not in CLASS_TO_INDEX:
             raise ValueError(
@@ -88,6 +92,7 @@ class BUSIDataset(Dataset):
         self,
         samples: list[BUSISample],
         image_size: int = 128,
+        augment: bool = False,
     ) -> None:
         if not samples:
             raise ValueError(
@@ -101,35 +106,92 @@ class BUSIDataset(Dataset):
 
         self.samples = samples
         self.image_size = image_size
+        self.augment = augment
 
     def __len__(self) -> int:
+        """Return the number of dataset samples."""
+
         return len(self.samples)
+
+    def _apply_joint_augmentation(
+        self,
+        image: Image.Image,
+        mask: Image.Image,
+    ) -> tuple[Image.Image, Image.Image]:
+        """Apply identical random spatial transforms to image and mask."""
+
+        # Apply horizontal flipping with 50% probability.
+        if torch.rand(1).item() < 0.5:
+            image = TF.hflip(image)
+            mask = TF.hflip(mask)
+
+        # Apply a small rotation with 50% probability.
+        if torch.rand(1).item() < 0.5:
+            angle = float(
+                torch.empty(1)
+                .uniform_(-10.0, 10.0)
+                .item()
+            )
+
+            # Use the image median as the rotation fill value
+            # to avoid creating artificial black corners.
+            fill_value = int(
+                ImageStat.Stat(image).median[0]
+            )
+
+            image = TF.rotate(
+                image,
+                angle=angle,
+                interpolation=InterpolationMode.BILINEAR,
+                fill=fill_value,
+            )
+
+            mask = TF.rotate(
+                mask,
+                angle=angle,
+                interpolation=InterpolationMode.NEAREST,
+                fill=0,
+            )
+
+        return image, mask
 
     def __getitem__(
         self,
         index: int,
     ) -> dict[str, torch.Tensor | str]:
+        """Load and preprocess one BUSI image-mask pair."""
+
         sample = self.samples[index]
 
-        with Image.open(sample.image_path) as image:
-            image = image.convert("L")
+        with (
+            Image.open(sample.image_path) as image_file,
+            Image.open(sample.mask_path) as mask_file,
+        ):
+            image = image_file.convert("L")
+            mask = mask_file.convert("L")
+
+            if self.augment:
+                image, mask = self._apply_joint_augmentation(
+                    image=image,
+                    mask=mask,
+                )
+
             image = TF.resize(
                 image,
                 [self.image_size, self.image_size],
                 interpolation=InterpolationMode.BILINEAR,
                 antialias=True,
             )
-            image_tensor = TF.to_tensor(image)
 
-        with Image.open(sample.mask_path) as mask:
-            mask = mask.convert("L")
             mask = TF.resize(
                 mask,
                 [self.image_size, self.image_size],
                 interpolation=InterpolationMode.NEAREST,
             )
 
-            # The original masks contain values 0 and 1.
+            image_tensor = TF.to_tensor(image)
+
+            # Keep the segmentation mask strictly binary.
             mask_tensor = (
                 TF.pil_to_tensor(mask) > 0
             ).float()
