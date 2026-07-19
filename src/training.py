@@ -7,6 +7,7 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from src.metrics import binary_segmentation_metrics_from_logits
+from pathlib import Path
 
 
 def train_one_epoch(
@@ -146,3 +147,90 @@ def evaluate_one_epoch(
         "dice": total_dice / processed_samples,
         "iou": total_iou / processed_samples,
     }
+
+def fit_model(
+    model: nn.Module,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: Optimizer,
+    device: torch.device,
+    num_epochs: int,
+    checkpoint_path: str | Path,
+    threshold: float = 0.5,
+) -> list[dict[str, int | float]]:
+    """Train for multiple epochs and save the best validation model."""
+
+    if num_epochs <= 0:
+        raise ValueError(
+            "Number of epochs must be greater than zero."
+        )
+
+    checkpoint_path = Path(checkpoint_path)
+
+    checkpoint_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    history: list[dict[str, int | float]] = []
+
+    best_validation_dice = float("-inf")
+
+    for epoch_index in range(num_epochs):
+        epoch_number = epoch_index + 1
+
+        train_result = train_one_epoch(
+            model=model,
+            data_loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            device=device,
+        )
+
+        validation_result = evaluate_one_epoch(
+            model=model,
+            data_loader=validation_loader,
+            criterion=criterion,
+            device=device,
+            threshold=threshold,
+        )
+
+        epoch_record: dict[str, int | float] = {
+            "epoch": epoch_number,
+            "train_loss": train_result["loss"],
+            "validation_loss": validation_result["loss"],
+            "validation_dice": validation_result["dice"],
+            "validation_iou": validation_result["iou"],
+        }
+
+        history.append(epoch_record)
+
+        validation_dice = validation_result["dice"]
+
+        if validation_dice > best_validation_dice:
+            best_validation_dice = validation_dice
+
+            torch.save(
+                {
+                    "epoch": epoch_number,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "validation_loss": validation_result["loss"],
+                    "validation_dice": validation_dice,
+                    "validation_iou": validation_result["iou"],
+                    "threshold": threshold,
+                },
+                checkpoint_path,
+            )
+
+        print(
+            f"Epoch {epoch_number:03d}/{num_epochs:03d} | "
+            f"Train Loss: {train_result['loss']:.4f} | "
+            f"Validation Loss: "
+            f"{validation_result['loss']:.4f} | "
+            f"Dice: {validation_result['dice']:.4f} | "
+            f"IoU: {validation_result['iou']:.4f}"
+        )
+
+    return history

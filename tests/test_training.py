@@ -12,9 +12,9 @@ from src.model import UNet
 from src.reproducibility import seed_everything
 from src.training import (
     evaluate_one_epoch,
+    fit_model,
     train_one_epoch,
 )
-
 
 def create_fake_data_loader(
     sample_count: int = 4,
@@ -229,5 +229,147 @@ def test_evaluate_one_epoch_rejects_empty_loader() -> None:
             data_loader=empty_loader,
             criterion=criterion,
             device=device,
+            threshold=0.5,
+        )
+
+def test_fit_model_saves_best_checkpoint(
+    tmp_path,
+) -> None:
+    """Multi-epoch training should save the best validation model."""
+
+    seed_everything(42)
+
+    device = torch.device("cpu")
+
+    train_loader = create_fake_data_loader(
+        sample_count=6,
+        batch_size=2,
+    )
+
+    validation_loader = create_fake_data_loader(
+        sample_count=4,
+        batch_size=2,
+    )
+
+    model = create_small_unet().to(device)
+
+    criterion = BCEDiceLoss(
+        bce_weight=0.5,
+        dice_weight=0.5,
+    )
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=1e-3,
+    )
+
+    checkpoint_path = (
+        tmp_path
+        / "checkpoints"
+        / "best_unet.pt"
+    )
+
+    history = fit_model(
+        model=model,
+        train_loader=train_loader,
+        validation_loader=validation_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        num_epochs=2,
+        checkpoint_path=checkpoint_path,
+        threshold=0.5,
+    )
+
+    assert len(history) == 2
+
+    assert history[0]["epoch"] == 1
+    assert history[1]["epoch"] == 2
+
+    expected_history_keys = {
+        "epoch",
+        "train_loss",
+        "validation_loss",
+        "validation_dice",
+        "validation_iou",
+    }
+
+    assert set(history[0]) == expected_history_keys
+    assert set(history[1]) == expected_history_keys
+
+    assert checkpoint_path.is_file()
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
+
+    expected_checkpoint_keys = {
+        "epoch",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "validation_loss",
+        "validation_dice",
+        "validation_iou",
+        "threshold",
+    }
+
+    assert set(checkpoint) == expected_checkpoint_keys
+
+    best_history_dice = max(
+        record["validation_dice"]
+        for record in history
+    )
+
+    assert checkpoint["epoch"] in {
+        1,
+        2,
+    }
+
+    assert checkpoint["threshold"] == 0.5
+
+    assert checkpoint[
+        "validation_dice"
+    ] == pytest.approx(
+        best_history_dice,
+        abs=1e-12,
+    )
+
+
+def test_fit_model_rejects_invalid_epoch_count(
+    tmp_path,
+) -> None:
+    """Training should reject nonpositive epoch counts."""
+
+    device = torch.device("cpu")
+
+    train_loader = create_fake_data_loader()
+    validation_loader = create_fake_data_loader()
+
+    model = create_small_unet().to(device)
+    criterion = BCEDiceLoss()
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=1e-3,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="greater than zero",
+    ):
+        fit_model(
+            model=model,
+            train_loader=train_loader,
+            validation_loader=validation_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            device=device,
+            num_epochs=0,
+            checkpoint_path=(
+                tmp_path
+                / "best_unet.pt"
+            ),
             threshold=0.5,
         )
