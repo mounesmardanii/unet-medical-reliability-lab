@@ -6,18 +6,23 @@ import torch
 
 
 @torch.no_grad()
-def binary_segmentation_metrics_from_logits(
+def binary_segmentation_statistics_per_image_from_logits(
     logits: torch.Tensor,
     targets: torch.Tensor,
     threshold: float = 0.5,
     epsilon: float = 1e-7,
 ) -> dict[str, torch.Tensor]:
-    """Compute mean Dice and IoU scores from segmentation logits."""
+    """Compute per-image segmentation metrics and confusion counts."""
 
     if logits.shape != targets.shape:
         raise ValueError(
             "Logits and targets must have identical shapes: "
             f"{logits.shape} versus {targets.shape}"
+        )
+
+    if logits.ndim < 2:
+        raise ValueError(
+            "Logits and targets must include a batch dimension."
         )
 
     if not 0.0 <= threshold <= 1.0:
@@ -34,22 +39,18 @@ def binary_segmentation_metrics_from_logits(
         dtype=logits.dtype,
     )
 
-    # Convert the model's raw logits into probabilities.
     probabilities = torch.sigmoid(logits)
 
-    # Convert probabilities into a binary predicted mask.
     predictions = (
         probabilities >= threshold
     ).to(dtype=logits.dtype)
 
-    # Ensure that the ground-truth mask is also binary.
     binary_targets = (
         targets >= 0.5
     ).to(dtype=logits.dtype)
 
     batch_size = logits.shape[0]
 
-    # Flatten each image and mask separately.
     predictions = predictions.reshape(
         batch_size,
         -1,
@@ -60,34 +61,116 @@ def binary_segmentation_metrics_from_logits(
         -1,
     )
 
-    intersection = (
+    true_positive = (
         predictions * binary_targets
     ).sum(dim=1)
 
-    prediction_size = predictions.sum(dim=1)
-    target_size = binary_targets.sum(dim=1)
+    false_positive = (
+        predictions * (1.0 - binary_targets)
+    ).sum(dim=1)
+
+    false_negative = (
+        (1.0 - predictions) * binary_targets
+    ).sum(dim=1)
+
+    true_negative = (
+        (1.0 - predictions)
+        * (1.0 - binary_targets)
+    ).sum(dim=1)
 
     dice_scores = (
-        2.0 * intersection + epsilon
+        2.0 * true_positive + epsilon
     ) / (
-        prediction_size
-        + target_size
+        2.0 * true_positive
+        + false_positive
+        + false_negative
         + epsilon
     )
 
-    union = (
-        prediction_size
-        + target_size
-        - intersection
+    iou_scores = (
+        true_positive + epsilon
+    ) / (
+        true_positive
+        + false_positive
+        + false_negative
+        + epsilon
     )
 
-    iou_scores = (
-        intersection + epsilon
+    precision_scores = true_positive / (
+        true_positive
+        + false_positive
+        + epsilon
+    )
+
+    sensitivity_scores = true_positive / (
+        true_positive
+        + false_negative
+        + epsilon
+    )
+
+    specificity_scores = true_negative / (
+        true_negative
+        + false_positive
+        + epsilon
+    )
+
+    total_pixels = (
+        true_positive
+        + false_positive
+        + false_negative
+        + true_negative
+    )
+
+    predicted_positive_fraction = (
+        true_positive + false_positive
     ) / (
-        union + epsilon
+        total_pixels + epsilon
+    )
+
+    target_positive_fraction = (
+        true_positive + false_negative
+    ) / (
+        total_pixels + epsilon
     )
 
     return {
-        "dice": dice_scores.mean(),
-        "iou": iou_scores.mean(),
+        "dice": dice_scores,
+        "iou": iou_scores,
+        "precision": precision_scores,
+        "sensitivity": sensitivity_scores,
+        "specificity": specificity_scores,
+        "true_positive": true_positive,
+        "false_positive": false_positive,
+        "false_negative": false_negative,
+        "true_negative": true_negative,
+        "predicted_positive_fraction": (
+            predicted_positive_fraction
+        ),
+        "target_positive_fraction": (
+            target_positive_fraction
+        ),
+    }
+
+
+@torch.no_grad()
+def binary_segmentation_metrics_from_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    threshold: float = 0.5,
+    epsilon: float = 1e-7,
+) -> dict[str, torch.Tensor]:
+    """Compute mean Dice and IoU scores from segmentation logits."""
+
+    statistics = (
+        binary_segmentation_statistics_per_image_from_logits(
+            logits=logits,
+            targets=targets,
+            threshold=threshold,
+            epsilon=epsilon,
+        )
+    )
+
+    return {
+        "dice": statistics["dice"].mean(),
+        "iou": statistics["iou"].mean(),
     }
